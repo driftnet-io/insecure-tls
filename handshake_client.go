@@ -16,11 +16,8 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"hash"
-	"internal/godebug"
 	"io"
 	"net"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -523,7 +520,7 @@ func (hs *clientHandshakeState) handshake() error {
 func (hs *clientHandshakeState) pickCipherSuite() error {
 	if hs.suite = mutualCipherSuite(hs.hello.cipherSuites, hs.serverHello.cipherSuite); hs.suite == nil {
 		hs.c.sendAlert(alertHandshakeFailure)
-		return errors.New("tls: server chose an unconfigured cipher suite")
+		return fmt.Errorf("tls: server chose an unconfigured cipher suite 0x%04x", hs.serverHello.cipherSuite)
 	}
 
 	hs.c.cipherSuite = hs.suite.id
@@ -640,7 +637,7 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 		}
 	}
 
-	preMasterSecret, ckx, err := keyAgreement.generateClientKeyExchange(c.config, hs.hello, c.peerCertificates[0])
+	preMasterSecret, ckx, err := keyAgreement.generateClientKeyExchange(c.config, hs.hello, c.peerCertificates[0], c.vers)
 	if err != nil {
 		c.sendAlert(alertInternalError)
 		return err
@@ -695,7 +692,11 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 			}
 		}
 
-		signed := hs.finishedHash.hashForClientCertificate(sigType, sigHash)
+		signed, err := hs.finishedHash.hashForClientCertificate(sigType, sigHash, hs.masterSecret)
+		if err != nil {
+			c.sendAlert(alertInternalError)
+			return err
+		}
 		signOpts := crypto.SignerOpts(sigHash)
 		if sigType == signatureRSAPSS {
 			signOpts = &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash, Hash: sigHash}
@@ -722,12 +723,12 @@ func (hs *clientHandshakeState) establishKeys() error {
 	clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV :=
 		keysFromMasterSecret(c.vers, hs.suite, hs.masterSecret, hs.hello.random, hs.serverHello.random, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)
 	var clientCipher, serverCipher any
-	var clientHash, serverHash hash.Hash
+	var clientHash, serverHash macFunction
 	if hs.suite.cipher != nil {
 		clientCipher = hs.suite.cipher(clientKey, clientIV, false /* not for reading */)
-		clientHash = hs.suite.mac(clientMAC)
+		clientHash = hs.suite.mac(c.vers, clientMAC)
 		serverCipher = hs.suite.cipher(serverKey, serverIV, true /* for reading */)
-		serverHash = hs.suite.mac(serverMAC)
+		serverHash = hs.suite.mac(c.vers, serverMAC)
 	} else {
 		clientCipher = hs.suite.aead(clientKey, clientIV)
 		serverCipher = hs.suite.aead(serverKey, serverIV)
@@ -938,22 +939,12 @@ func (hs *clientHandshakeState) sendFinished(out []byte) error {
 	return nil
 }
 
-// defaultMaxRSAKeySize is the maximum RSA key size in bits that we are willing
+// maxRSAKeySize is the maximum RSA key size in bits that we are willing
 // to verify the signatures of during a TLS handshake.
-const defaultMaxRSAKeySize = 8192
-
-var tlsmaxrsasize = godebug.New("tlsmaxrsasize")
+const maxRSAKeySize = 16384
 
 func checkKeySize(n int) (max int, ok bool) {
-	if v := tlsmaxrsasize.Value(); v != "" {
-		if max, err := strconv.Atoi(v); err == nil {
-			if (n <= max) != (n <= defaultMaxRSAKeySize) {
-				tlsmaxrsasize.IncNonDefault()
-			}
-			return max, n <= max
-		}
-	}
-	return defaultMaxRSAKeySize, n <= defaultMaxRSAKeySize
+	return maxRSAKeySize, n <= maxRSAKeySize
 }
 
 // verifyServerCertificate parses and verifies the provided chain, setting

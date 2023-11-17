@@ -14,7 +14,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"net"
 	"sync"
@@ -170,13 +169,13 @@ type halfConn struct {
 	err     error  // first permanent error
 	version uint16 // protocol version
 	cipher  any    // cipher algorithm
-	mac     hash.Hash
+	mac     macFunction
 	seq     [8]byte // 64-bit sequence number
 
-	scratchBuf [13]byte // to avoid allocs; interface method args escape
+	additionalData [13]byte // to avoid allocs; interface method args escape
 
-	nextCipher any       // next encryption state
-	nextMac    hash.Hash // next MAC algorithm
+	nextCipher any         // next encryption state
+	nextMac    macFunction // next MAC algorithm
 
 	level         QUICEncryptionLevel // current QUIC encryption level
 	trafficSecret []byte              // current TLS 1.3 traffic secret
@@ -202,7 +201,7 @@ func (hc *halfConn) setErrorLocked(err error) error {
 
 // prepareCipherSpec sets the encryption and MAC states
 // that a subsequent changeCipherSpec will use.
-func (hc *halfConn) prepareCipherSpec(version uint16, cipher any, mac hash.Hash) {
+func (hc *halfConn) prepareCipherSpec(version uint16, cipher any, mac macFunction) {
 	hc.version = version
 	hc.nextCipher = cipher
 	hc.nextMac = mac
@@ -323,6 +322,22 @@ func extractPadding(payload []byte) (toRemove int, good byte) {
 	return
 }
 
+// extractPaddingSSL30 is a replacement for extractPadding in the case that the
+// protocol version is SSLv3. In this version, the contents of the padding
+// are random and cannot be checked.
+func extractPaddingSSL30(payload []byte) (toRemove int, good byte) {
+	if len(payload) < 1 {
+		return 0, 0
+	}
+
+	paddingLen := int(payload[len(payload)-1]) + 1
+	if paddingLen > len(payload) {
+		return 0, 0
+	}
+
+	return paddingLen, 255
+}
+
 func roundUp(a, b int) int {
 	return a + (b-a%b)%b
 }
@@ -365,14 +380,15 @@ func (hc *halfConn) decrypt(record []byte) ([]byte, recordType, error) {
 			}
 			payload = payload[explicitNonceLen:]
 
-			var additionalData []byte
+			additionalData := hc.additionalData[:]
 			if hc.version == VersionTLS13 {
 				additionalData = record[:recordHeaderLen]
 			} else {
-				additionalData = append(hc.scratchBuf[:0], hc.seq[:]...)
-				additionalData = append(additionalData, record[:3]...)
+				copy(additionalData, hc.seq[:])
+				copy(additionalData[8:], record[:3])
 				n := len(payload) - c.Overhead()
-				additionalData = append(additionalData, byte(n>>8), byte(n))
+				additionalData[11] = byte(n >> 8)
+				additionalData[12] = byte(n)
 			}
 
 			var err error
@@ -399,7 +415,11 @@ func (hc *halfConn) decrypt(record []byte) ([]byte, recordType, error) {
 			// computing the digest. This makes the MAC roughly constant time as
 			// long as the digest computation is constant time and does not
 			// affect the subsequent write, modulo cache effects.
-			paddingLen, paddingGood = extractPadding(payload)
+			if hc.version == VersionSSL30 {
+				paddingLen, paddingGood = extractPaddingSSL30(payload)
+			} else {
+				paddingLen, paddingGood = extractPadding(payload)
+			}
 		default:
 			panic("unknown cipher type")
 		}
@@ -438,7 +458,7 @@ func (hc *halfConn) decrypt(record []byte) ([]byte, recordType, error) {
 		record[3] = byte(n >> 8)
 		record[4] = byte(n)
 		remoteMAC := payload[n : n+macSize]
-		localMAC := tls10MAC(hc.mac, hc.scratchBuf[:0], hc.seq[:], record[:recordHeaderLen], payload[:n], payload[n+macSize:])
+		localMAC := hc.mac.MAC(hc.seq[0:], record[:recordHeaderLen], payload[:n], payload[n+macSize:])
 
 		// This is equivalent to checking the MACs and paddingGood
 		// separately, but in constant-time to prevent distinguishing
@@ -474,7 +494,7 @@ func sliceForAppend(in []byte, n int) (head, tail []byte) {
 }
 
 // encrypt encrypts payload, adding the appropriate nonce and/or MAC, and
-// appends it to record, which must already contain the record header.
+// appends it to record, which contains the record header.
 func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, error) {
 	if hc.cipher == nil {
 		return append(record, payload...), nil
@@ -491,7 +511,7 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 			// an 8 bytes nonce but its nonces must be unpredictable (see RFC
 			// 5246, Appendix F.3), forcing us to use randomness. That's not
 			// 3DES' biggest problem anyway because the birthday bound on block
-			// collision is reached first due to its similarly small block size
+			// collision is reached first due to its simlarly small block size
 			// (see the Sweet32 attack).
 			copy(explicitNonce, hc.seq[:])
 		} else {
@@ -501,10 +521,14 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 		}
 	}
 
+	var mac []byte
+	if hc.mac != nil {
+		mac = hc.mac.MAC(hc.seq[:], record[:recordHeaderLen], payload, nil)
+	}
+
 	var dst []byte
 	switch c := hc.cipher.(type) {
 	case cipher.Stream:
-		mac := tls10MAC(hc.mac, hc.scratchBuf[:0], hc.seq[:], record[:recordHeaderLen], payload, nil)
 		record, dst = sliceForAppend(record, len(payload)+len(mac))
 		c.XORKeyStream(dst[:len(payload)], payload)
 		c.XORKeyStream(dst[len(payload):], mac)
@@ -528,12 +552,11 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 			record = c.Seal(record[:recordHeaderLen],
 				nonce, record[recordHeaderLen:], record[:recordHeaderLen])
 		} else {
-			additionalData := append(hc.scratchBuf[:0], hc.seq[:]...)
-			additionalData = append(additionalData, record[:recordHeaderLen]...)
-			record = c.Seal(record, nonce, payload, additionalData)
+			copy(hc.additionalData[:], hc.seq[:])
+			copy(hc.additionalData[8:], record)
+			record = c.Seal(record, nonce, payload, hc.additionalData[:])
 		}
 	case cbcMode:
-		mac := tls10MAC(hc.mac, hc.scratchBuf[:0], hc.seq[:], record[:recordHeaderLen], payload, nil)
 		blockSize := c.BlockSize()
 		plaintextLen := len(payload) + len(mac)
 		paddingLen := blockSize - plaintextLen%blockSize
@@ -1209,7 +1232,7 @@ func (c *Conn) Write(b []byte) (int, error) {
 		return 0, errShutdown
 	}
 
-	// TLS 1.0 is susceptible to a chosen-plaintext
+	// SSL 3.0 and TLS 1.0 are susceptible to a chosen-plaintext
 	// attack when using block mode ciphers due to predictable IVs.
 	// This can be prevented by splitting each Application Data
 	// record into two records, effectively randomizing the IV.
@@ -1219,7 +1242,7 @@ func (c *Conn) Write(b []byte) (int, error) {
 	// https://www.imperialviolet.org/2012/01/15/beastfollowup.html
 
 	var m int
-	if len(b) > 1 && c.vers == VersionTLS10 {
+	if len(b) > 1 && c.vers <= VersionTLS10 {
 		if _, ok := c.out.cipher.(cipher.BlockMode); ok {
 			n, err := c.writeRecordLocked(recordTypeApplicationData, b[:1])
 			if err != nil {

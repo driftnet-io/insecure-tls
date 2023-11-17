@@ -10,15 +10,15 @@ import (
 	"crypto/cipher"
 	"crypto/des"
 	"crypto/hmac"
-	"crypto/internal/boring"
+	"crypto/md5"
 	"crypto/rc4"
 	"crypto/sha1"
 	"crypto/sha256"
 	"fmt"
 	"hash"
-	"internal/cpu"
 	"runtime"
 
+	"github.com/driftnet-io/insecure-tls/stubs/boring"
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
@@ -78,6 +78,7 @@ func InsecureCipherSuites() []*CipherSuite {
 	// This list includes RC4, CBC_SHA256, and 3DES cipher suites. See
 	// cipherSuitesPreferenceOrder for details.
 	return []*CipherSuite{
+		{TLS_RSA_WITH_RC4_128_MD5, "TLS_RSA_WITH_RC4_128_MD5", supportedUpToTLS12, true},
 		{TLS_RSA_WITH_RC4_128_SHA, "TLS_RSA_WITH_RC4_128_SHA", supportedUpToTLS12, true},
 		{TLS_RSA_WITH_3DES_EDE_CBC_SHA, "TLS_RSA_WITH_3DES_EDE_CBC_SHA", supportedUpToTLS12, true},
 		{TLS_RSA_WITH_AES_128_CBC_SHA, "TLS_RSA_WITH_AES_128_CBC_SHA", supportedUpToTLS12, true},
@@ -141,7 +142,7 @@ type cipherSuite struct {
 	// flags is a bitmask of the suite* values, above.
 	flags  int
 	cipher func(key, iv []byte, isRead bool) any
-	mac    func(key []byte) hash.Hash
+	mac    func(version uint16, macKey []byte) macFunction
 	aead   func(key, fixedNonce []byte) aead
 }
 
@@ -166,6 +167,7 @@ var cipherSuites = []*cipherSuite{ // TODO: replace with a map, since the order 
 	{TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA, 24, 20, 8, ecdheRSAKA, suiteECDHE, cipher3DES, macSHA1, nil},
 	{TLS_RSA_WITH_3DES_EDE_CBC_SHA, 24, 20, 8, rsaKA, 0, cipher3DES, macSHA1, nil},
 	{TLS_RSA_WITH_RC4_128_SHA, 16, 20, 0, rsaKA, 0, cipherRC4, macSHA1, nil},
+	{TLS_RSA_WITH_RC4_128_MD5, 16, 16, 0, rsaKA, 0, cipherRC4, macMD5, nil},
 	{TLS_ECDHE_RSA_WITH_RC4_128_SHA, 16, 20, 0, ecdheRSAKA, suiteECDHE, cipherRC4, macSHA1, nil},
 	{TLS_ECDHE_ECDSA_WITH_RC4_128_SHA, 16, 20, 0, ecdheECDSAKA, suiteECDHE | suiteECSign, cipherRC4, macSHA1, nil},
 }
@@ -295,7 +297,7 @@ var cipherSuitesPreferenceOrder = []uint16{
 
 	// RC4
 	TLS_ECDHE_ECDSA_WITH_RC4_128_SHA, TLS_ECDHE_RSA_WITH_RC4_128_SHA,
-	TLS_RSA_WITH_RC4_128_SHA,
+	TLS_RSA_WITH_RC4_128_SHA, TLS_RSA_WITH_RC4_128_MD5,
 }
 
 var cipherSuitesPreferenceOrderNoAES = []uint16{
@@ -318,7 +320,7 @@ var cipherSuitesPreferenceOrderNoAES = []uint16{
 	TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256, TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
 	TLS_RSA_WITH_AES_128_CBC_SHA256,
 	TLS_ECDHE_ECDSA_WITH_RC4_128_SHA, TLS_ECDHE_RSA_WITH_RC4_128_SHA,
-	TLS_RSA_WITH_RC4_128_SHA,
+	TLS_RSA_WITH_RC4_128_SHA, TLS_RSA_WITH_RC4_128_MD5,
 }
 
 // disabledCipherSuites are not used unless explicitly listed in Config.CipherSuites.
@@ -332,6 +334,7 @@ var disabledCipherSuites = map[uint16]bool{
 	TLS_ECDHE_ECDSA_WITH_RC4_128_SHA: true,
 	TLS_ECDHE_RSA_WITH_RC4_128_SHA:   true,
 	TLS_RSA_WITH_RC4_128_SHA:         true,
+	TLS_RSA_WITH_RC4_128_MD5:         true,
 }
 
 var defaultCipherSuites []uint16
@@ -362,11 +365,10 @@ var defaultCipherSuitesTLS13NoAES = []uint16{
 }
 
 var (
-	hasGCMAsmAMD64 = cpu.X86.HasAES && cpu.X86.HasPCLMULQDQ
-	hasGCMAsmARM64 = cpu.ARM64.HasAES && cpu.ARM64.HasPMULL
-	// Keep in sync with crypto/aes/cipher_s390x.go.
-	hasGCMAsmS390X = cpu.S390X.HasAES && cpu.S390X.HasAESCBC && cpu.S390X.HasAESCTR &&
-		(cpu.S390X.HasGHASH || cpu.S390X.HasAESGCM)
+	// These are stubbed out
+	hasGCMAsmAMD64 = true
+	hasGCMAsmARM64 = true
+	hasGCMAsmS390X = true
 
 	hasAESGCMHardwareSupport = runtime.GOARCH == "amd64" && hasGCMAsmAMD64 ||
 		runtime.GOARCH == "arm64" && hasGCMAsmARM64 ||
@@ -419,21 +421,46 @@ func cipherAES(key, iv []byte, isRead bool) any {
 	return cipher.NewCBCEncrypter(block, iv)
 }
 
-// macSHA1 returns a SHA-1 based constant time MAC.
-func macSHA1(key []byte) hash.Hash {
-	h := sha1.New
-	// The BoringCrypto SHA1 does not have a constant-time
-	// checksum function, so don't try to use it.
-	if !boring.Enabled {
-		h = newConstantTimeHash(h)
+// macSHA1 returns a macFunction for the given protocol version.
+func macSHA1(version uint16, key []byte) macFunction {
+	if version == VersionSSL30 {
+		mac := ssl30MAC{
+			h:   sha1.New(),
+			key: make([]byte, len(key)),
+		}
+		copy(mac.key, key)
+		return mac
 	}
-	return hmac.New(h, key)
+	return tls10MAC{h: hmac.New(newConstantTimeHash(sha1.New), key)}
 }
 
-// macSHA256 returns a SHA-256 based MAC. This is only supported in TLS 1.2 and
-// is currently only used in disabled-by-default cipher suites.
-func macSHA256(key []byte) hash.Hash {
-	return hmac.New(sha256.New, key)
+// macMD5 returns a macFunction for the given protocol version.
+func macMD5(version uint16, key []byte) macFunction {
+	if version == VersionSSL30 {
+		mac := ssl30MAC{
+			h:   md5.New(),
+			key: make([]byte, len(key)),
+		}
+		copy(mac.key, key)
+		return mac
+	}
+	// There is no option for a constant-time MD5
+	return tls10MAC{h: hmac.New(md5.New, key)}
+}
+
+// macSHA256 returns a SHA-256 based MAC. These are only supported in TLS 1.2
+// so the given version is ignored.
+func macSHA256(version uint16, key []byte) macFunction {
+	return tls10MAC{h: hmac.New(sha256.New, key)}
+}
+
+type macFunction interface {
+	// Size returns the length of the MAC.
+	Size() int
+	// MAC appends the MAC of (seq, header, data) to out. The extra data is fed
+	// into the MAC after obtaining the result to normalize timing. The result
+	// is only valid until the next invocation of MAC as the buffer is reused.
+	MAC(seq, header, data, extra []byte) []byte
 }
 
 type aead interface {
@@ -563,6 +590,46 @@ func aeadChaCha20Poly1305(key, nonceMask []byte) aead {
 	return ret
 }
 
+// ssl30MAC implements the SSLv3 MAC function, as defined in
+// www.mozilla.org/projects/security/pki/nss/ssl/draft302.txt section 5.2.3.1
+type ssl30MAC struct {
+	h   hash.Hash
+	key []byte
+	buf []byte
+}
+
+func (s ssl30MAC) Size() int {
+	return s.h.Size()
+}
+
+var ssl30Pad1 = [48]byte{0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36}
+
+var ssl30Pad2 = [48]byte{0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c}
+
+// MAC does not offer constant timing guarantees for SSL v3.0, since it's deemed
+// useless considering the similar, protocol-level POODLE vulnerability.
+func (s ssl30MAC) MAC(seq, header, data, extra []byte) []byte {
+	padLength := 48
+	if s.h.Size() == 20 {
+		padLength = 40
+	}
+
+	s.h.Reset()
+	s.h.Write(s.key)
+	s.h.Write(ssl30Pad1[:padLength])
+	s.h.Write(seq)
+	s.h.Write(header[:1])
+	s.h.Write(header[3:5])
+	s.h.Write(data)
+	s.buf = s.h.Sum(s.buf[:0])
+
+	s.h.Reset()
+	s.h.Write(s.key)
+	s.h.Write(ssl30Pad2[:padLength])
+	s.h.Write(s.buf)
+	return s.h.Sum(s.buf[:0])
+}
+
 type constantTimeHash interface {
 	hash.Hash
 	ConstantTimeSum(b []byte) []byte
@@ -588,14 +655,26 @@ func newConstantTimeHash(h func() hash.Hash) func() hash.Hash {
 }
 
 // tls10MAC implements the TLS 1.0 MAC function. RFC 2246, Section 6.2.3.
-func tls10MAC(h hash.Hash, out, seq, header, data, extra []byte) []byte {
-	h.Reset()
-	h.Write(seq)
-	h.Write(header)
-	h.Write(data)
-	res := h.Sum(out)
+type tls10MAC struct {
+	h   hash.Hash
+	buf []byte
+}
+
+func (s tls10MAC) Size() int {
+	return s.h.Size()
+}
+
+// MAC is guaranteed to take constant time, as long as
+// len(seq)+len(header)+len(data)+len(extra) is constant. extra is not fed into
+// the MAC, but is only provided to make the timing profile constant.
+func (s tls10MAC) MAC(seq, header, data, extra []byte) []byte {
+	s.h.Reset()
+	s.h.Write(seq)
+	s.h.Write(header)
+	s.h.Write(data)
+	res := s.h.Sum(s.buf[:0])
 	if extra != nil {
-		h.Write(extra)
+		s.h.Write(extra)
 	}
 	return res
 }
@@ -662,6 +741,7 @@ func cipherSuiteTLS13ByID(id uint16) *cipherSuiteTLS13 {
 // See https://www.iana.org/assignments/tls-parameters/tls-parameters.xml
 const (
 	// TLS 1.0 - 1.2 cipher suites.
+	TLS_RSA_WITH_RC4_128_MD5                      uint16 = 0x0004
 	TLS_RSA_WITH_RC4_128_SHA                      uint16 = 0x0005
 	TLS_RSA_WITH_3DES_EDE_CBC_SHA                 uint16 = 0x000a
 	TLS_RSA_WITH_AES_128_CBC_SHA                  uint16 = 0x002f

@@ -14,7 +14,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"time"
 )
@@ -726,8 +725,11 @@ func (hs *serverHandshakeState) doFullHandshake() error {
 			}
 		}
 
-		signed := hs.finishedHash.hashForClientCertificate(sigType, sigHash)
-		if err := verifyHandshakeSignature(sigType, pub, sigHash, signed, certVerify.signature); err != nil {
+		signed, err := hs.finishedHash.hashForClientCertificate(sigType, sigHash, hs.masterSecret)
+		if err == nil {
+			err = verifyHandshakeSignature(sigType, pub, sigHash, signed, certVerify.signature)
+		}
+		if err != nil {
 			c.sendAlert(alertDecryptError)
 			return errors.New("tls: invalid signature by the client certificate: " + err.Error())
 		}
@@ -749,13 +751,13 @@ func (hs *serverHandshakeState) establishKeys() error {
 		keysFromMasterSecret(c.vers, hs.suite, hs.masterSecret, hs.clientHello.random, hs.hello.random, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)
 
 	var clientCipher, serverCipher any
-	var clientHash, serverHash hash.Hash
+	var clientHash, serverHash macFunction
 
 	if hs.suite.aead == nil {
 		clientCipher = hs.suite.cipher(clientKey, clientIV, true /* for reading */)
-		clientHash = hs.suite.mac(clientMAC)
+		clientHash = hs.suite.mac(c.vers, clientMAC)
 		serverCipher = hs.suite.cipher(serverKey, serverIV, false /* not for reading */)
-		serverHash = hs.suite.mac(serverMAC)
+		serverHash = hs.suite.mac(c.vers, serverMAC)
 	} else {
 		clientCipher = hs.suite.aead(clientKey, clientIV)
 		serverCipher = hs.suite.aead(serverKey, serverIV)
