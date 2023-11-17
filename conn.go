@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"hash"
-	"internal/godebug"
 	"io"
 	"net"
 	"sync"

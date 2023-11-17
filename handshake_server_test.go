@@ -393,7 +393,7 @@ func TestVersion(t *testing.T) {
 	}
 	clientConfig := &Config{
 		InsecureSkipVerify: true,
-		MinVersion:         VersionTLS12,
+		MinVersion:         VersionTLS10,
 	}
 	state, _, err := testHandshake(t, clientConfig, serverConfig)
 	if err != nil {

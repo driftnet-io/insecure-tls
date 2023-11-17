@@ -334,32 +334,15 @@ var disabledCipherSuites = map[uint16]bool{
 	TLS_RSA_WITH_RC4_128_SHA:         true,
 }
 
-// rsaKexCiphers contains the ciphers which use RSA based key exchange,
-// which we also disable by default unless a GODEBUG is set.
-var rsaKexCiphers = map[uint16]bool{
-	TLS_RSA_WITH_RC4_128_SHA:        true,
-	TLS_RSA_WITH_3DES_EDE_CBC_SHA:   true,
-	TLS_RSA_WITH_AES_128_CBC_SHA:    true,
-	TLS_RSA_WITH_AES_256_CBC_SHA:    true,
-	TLS_RSA_WITH_AES_128_CBC_SHA256: true,
-	TLS_RSA_WITH_AES_128_GCM_SHA256: true,
-	TLS_RSA_WITH_AES_256_GCM_SHA384: true,
-}
-
 var defaultCipherSuites []uint16
-var defaultCipherSuitesWithRSAKex []uint16
 
 func init() {
 	defaultCipherSuites = make([]uint16, 0, len(cipherSuitesPreferenceOrder))
-	defaultCipherSuitesWithRSAKex = make([]uint16, 0, len(cipherSuitesPreferenceOrder))
 	for _, c := range cipherSuitesPreferenceOrder {
 		if disabledCipherSuites[c] {
 			continue
 		}
-		if !rsaKexCiphers[c] {
-			defaultCipherSuites = append(defaultCipherSuites, c)
-		}
-		defaultCipherSuitesWithRSAKex = append(defaultCipherSuitesWithRSAKex, c)
+		defaultCipherSuites = append(defaultCipherSuites, c)
 	}
 }
 
