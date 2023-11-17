@@ -12,6 +12,7 @@ import (
 	"crypto/hmac"
 	"crypto/rsa"
 	"errors"
+	"fmt"
 	"hash"
 	"time"
 )
@@ -162,7 +163,7 @@ func (hs *clientHandshakeStateTLS13) checkServerHelloOrHRR() error {
 	}
 	if selectedSuite == nil {
 		c.sendAlert(alertIllegalParameter)
-		return errors.New("tls: server chose an unconfigured cipher suite")
+		return fmt.Errorf("tls: server chose an unconfigured cipher suite 0x%04x", hs.serverHello.cipherSuite)
 	}
 	hs.suite = selectedSuite
 	c.cipherSuite = hs.suite.id

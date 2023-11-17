@@ -15,6 +15,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha512"
+	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -26,14 +27,11 @@ import (
 )
 
 const (
+	VersionSSL30 = 0x0300
 	VersionTLS10 = 0x0301
 	VersionTLS11 = 0x0302
 	VersionTLS12 = 0x0303
 	VersionTLS13 = 0x0304
-
-	// Deprecated: SSLv3 is cryptographically broken, and is no longer
-	// supported by this package. See golang.org/issue/32716.
-	VersionSSL30 = 0x0300
 )
 
 // VersionName returns the name for the provided TLS version number
@@ -235,66 +233,7 @@ var testingOnlyForceDowngradeCanary bool
 
 // ConnectionState records basic TLS details about the connection.
 type ConnectionState struct {
-	// Version is the TLS version used by the connection (e.g. VersionTLS12).
-	Version uint16
-
-	// HandshakeComplete is true if the handshake has concluded.
-	HandshakeComplete bool
-
-	// DidResume is true if this connection was successfully resumed from a
-	// previous session with a session ticket or similar mechanism.
-	DidResume bool
-
-	// CipherSuite is the cipher suite negotiated for the connection (e.g.
-	// TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_AES_128_GCM_SHA256).
-	CipherSuite uint16
-
-	// NegotiatedProtocol is the application protocol negotiated with ALPN.
-	NegotiatedProtocol string
-
-	// NegotiatedProtocolIsMutual used to indicate a mutual NPN negotiation.
-	//
-	// Deprecated: this value is always true.
-	NegotiatedProtocolIsMutual bool
-
-	// ServerName is the value of the Server Name Indication extension sent by
-	// the client. It's available both on the server and on the client side.
-	ServerName string
-
-	// PeerCertificates are the parsed certificates sent by the peer, in the
-	// order in which they were sent. The first element is the leaf certificate
-	// that the connection is verified against.
-	//
-	// On the client side, it can't be empty. On the server side, it can be
-	// empty if Config.ClientAuth is not RequireAnyClientCert or
-	// RequireAndVerifyClientCert.
-	//
-	// PeerCertificates and its contents should not be modified.
-	PeerCertificates []*x509.Certificate
-
-	// VerifiedChains is a list of one or more chains where the first element is
-	// PeerCertificates[0] and the last element is from Config.RootCAs (on the
-	// client side) or Config.ClientCAs (on the server side).
-	//
-	// On the client side, it's set if Config.InsecureSkipVerify is false. On
-	// the server side, it's set if Config.ClientAuth is VerifyClientCertIfGiven
-	// (and the peer provided a certificate) or RequireAndVerifyClientCert.
-	//
-	// VerifiedChains and its contents should not be modified.
-	VerifiedChains [][]*x509.Certificate
-
-	// SignedCertificateTimestamps is a list of SCTs provided by the peer
-	// through the TLS handshake for the leaf certificate, if any.
-	SignedCertificateTimestamps [][]byte
-
-	// OCSPResponse is a stapled Online Certificate Status Protocol (OCSP)
-	// response provided by the peer for the leaf certificate, if any.
-	OCSPResponse []byte
-
-	// TLSUnique contains the "tls-unique" channel binding value (see RFC 5929,
-	// Section 3). This value will be nil for TLS 1.3 connections and for
-	// resumed connections that don't support Extended Master Secret (RFC 7627).
-	TLSUnique []byte
+	tls.ConnectionState
 
 	// ekm is a closure exposed via ExportKeyingMaterial.
 	ekm func(label string, context []byte, length int) ([]byte, error)
@@ -732,14 +671,8 @@ type Config struct {
 
 	// MinVersion contains the minimum TLS version that is acceptable.
 	//
-	// By default, TLS 1.2 is currently used as the minimum when acting as a
-	// client, and TLS 1.0 when acting as a server. TLS 1.0 is the minimum
-	// supported by this package, both as a client and as a server.
-	//
-	// The client-side default can temporarily be reverted to TLS 1.0 by
-	// including the value "x509sha1=1" in the GODEBUG environment variable.
-	// Note that this option will be removed in Go 1.19 (but it will still be
-	// possible to set this field to VersionTLS10 explicitly).
+	// By default, the maximum version supported by this package is used,
+	// which is currently SSLv3.
 	MinVersion uint16
 
 	// MaxVersion contains the maximum TLS version that is acceptable.
@@ -1021,6 +954,7 @@ var supportedVersions = []uint16{
 	VersionTLS12,
 	VersionTLS11,
 	VersionTLS10,
+	VersionSSL30,
 }
 
 // roleClient and roleServer are meant to call supportedVersions and parents
@@ -1032,10 +966,6 @@ func (c *Config) supportedVersions(isClient bool) []uint16 {
 	versions := make([]uint16, 0, len(supportedVersions))
 	for _, v := range supportedVersions {
 		if needFIPS() && (v < fipsMinVersion(c) || v > fipsMaxVersion(c)) {
-			continue
-		}
-		if (c == nil || c.MinVersion == 0) &&
-			isClient && v < VersionTLS12 {
 			continue
 		}
 		if c != nil && c.MinVersion != 0 && v < c.MinVersion {

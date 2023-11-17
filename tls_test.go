@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"internal/testenv"
 	"io"
 	"math"
 	"net"
@@ -22,6 +21,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/driftnet-io/insecure-tls/stubs/testenv"
 )
 
 var rsaCertPEM = `-----BEGIN CERTIFICATE-----
@@ -1581,6 +1582,12 @@ func TestCipherSuites(t *testing.T) {
 			} else if aSuite.flags&suiteECSign == 0 && bSuite.flags&suiteECSign != 0 {
 				return false
 			}
+			// SHA < MD5
+			if strings.HasSuffix(aName, "_SHA") && strings.HasSuffix(bName, "_MD5") {
+				return true
+			} else if strings.HasSuffix(aName, "_MD5") && strings.HasSuffix(bName, "_SHA") {
+				return false
+			}
 			t.Fatalf("two ciphersuites are equal by all criteria: %v and %v", aName, bName)
 			panic("unreachable")
 		}
@@ -1604,6 +1611,7 @@ func TestVersionName(t *testing.T) {
 func http2isBadCipher(cipher uint16) bool {
 	switch cipher {
 	case TLS_RSA_WITH_RC4_128_SHA,
+		TLS_RSA_WITH_RC4_128_MD5,
 		TLS_RSA_WITH_3DES_EDE_CBC_SHA,
 		TLS_RSA_WITH_AES_128_CBC_SHA,
 		TLS_RSA_WITH_AES_256_CBC_SHA,

@@ -32,7 +32,7 @@ type keyAgreement interface {
 	// This method may not be called if the server doesn't send a
 	// ServerKeyExchange message.
 	processServerKeyExchange(*Config, *clientHelloMsg, *serverHelloMsg, *x509.Certificate, *serverKeyExchangeMsg) error
-	generateClientKeyExchange(*Config, *clientHelloMsg, *x509.Certificate) ([]byte, *clientKeyExchangeMsg, error)
+	generateClientKeyExchange(*Config, *clientHelloMsg, *x509.Certificate, uint16) ([]byte, *clientKeyExchangeMsg, error)
 }
 
 var errClientKeyExchange = errors.New("tls: invalid ClientKeyExchange message")
@@ -50,12 +50,15 @@ func (ka rsaKeyAgreement) processClientKeyExchange(config *Config, cert *Certifi
 	if len(ckx.ciphertext) < 2 {
 		return nil, errClientKeyExchange
 	}
-	ciphertextLen := int(ckx.ciphertext[0])<<8 | int(ckx.ciphertext[1])
-	if ciphertextLen != len(ckx.ciphertext)-2 {
-		return nil, errClientKeyExchange
-	}
-	ciphertext := ckx.ciphertext[2:]
 
+	ciphertext := ckx.ciphertext
+	if version != VersionSSL30 {
+		ciphertextLen := int(ckx.ciphertext[0])<<8 | int(ckx.ciphertext[1])
+		if ciphertextLen != len(ckx.ciphertext)-2 {
+			return nil, errClientKeyExchange
+		}
+		ciphertext = ckx.ciphertext[2:]
+	}
 	priv, ok := cert.PrivateKey.(crypto.Decrypter)
 	if !ok {
 		return nil, errors.New("tls: certificate private key does not implement crypto.Decrypter")
@@ -78,7 +81,7 @@ func (ka rsaKeyAgreement) processServerKeyExchange(config *Config, clientHello *
 	return errors.New("tls: unexpected ServerKeyExchange")
 }
 
-func (ka rsaKeyAgreement) generateClientKeyExchange(config *Config, clientHello *clientHelloMsg, cert *x509.Certificate) ([]byte, *clientKeyExchangeMsg, error) {
+func (ka rsaKeyAgreement) generateClientKeyExchange(config *Config, clientHello *clientHelloMsg, cert *x509.Certificate, version uint16) ([]byte, *clientKeyExchangeMsg, error) {
 	preMasterSecret := make([]byte, 48)
 	preMasterSecret[0] = byte(clientHello.vers >> 8)
 	preMasterSecret[1] = byte(clientHello.vers)
@@ -96,10 +99,15 @@ func (ka rsaKeyAgreement) generateClientKeyExchange(config *Config, clientHello 
 		return nil, nil, err
 	}
 	ckx := new(clientKeyExchangeMsg)
-	ckx.ciphertext = make([]byte, len(encrypted)+2)
-	ckx.ciphertext[0] = byte(len(encrypted) >> 8)
-	ckx.ciphertext[1] = byte(len(encrypted))
-	copy(ckx.ciphertext[2:], encrypted)
+	if version != VersionSSL30 {
+		ckx.ciphertext = make([]byte, len(encrypted)+2)
+		ckx.ciphertext[0] = byte(len(encrypted) >> 8)
+		ckx.ciphertext[1] = byte(len(encrypted))
+		copy(ckx.ciphertext[2:], encrypted)
+	} else {
+		ckx.ciphertext = make([]byte, len(encrypted))
+		copy(ckx.ciphertext, encrypted)
+	}
 	return preMasterSecret, ckx, nil
 }
 
@@ -357,7 +365,7 @@ func (ka *ecdheKeyAgreement) processServerKeyExchange(config *Config, clientHell
 	return nil
 }
 
-func (ka *ecdheKeyAgreement) generateClientKeyExchange(config *Config, clientHello *clientHelloMsg, cert *x509.Certificate) ([]byte, *clientKeyExchangeMsg, error) {
+func (ka *ecdheKeyAgreement) generateClientKeyExchange(config *Config, clientHello *clientHelloMsg, cert *x509.Certificate, version uint16) ([]byte, *clientKeyExchangeMsg, error) {
 	if ka.ckx == nil {
 		return nil, nil, errors.New("tls: missing ServerKeyExchange message")
 	}
