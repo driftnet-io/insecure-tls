@@ -2,7 +2,7 @@
 
 This is an **insecure** fork of golang's `crypto/tls` library.
 
-It is motivated by ongoing efforts to deprecate and eventually remove weak or broken protocols and ciphers from the standard library (e.g. issues [32716](https://github.com/golang/go/issues/32716), [45428](https://github.com/golang/go/issues/45428), [63413](https://github.com/golang/go/issues/63413)), and by the need for [driftnet](driftnet.io) to maintain support for those protocols and ciphers.
+It is motivated by ongoing efforts to deprecate and eventually remove weak or broken protocols and ciphers from the standard library (e.g. issues [32716](https://github.com/golang/go/issues/32716), [45428](https://github.com/golang/go/issues/45428), [63413](https://github.com/golang/go/issues/63413)), and by the need for [driftnet](https://driftnet.io) to maintain support for those protocols and ciphers.
 
 This fork aims for minimal deviation from the official `crypto/tls`, whilst supporting protocols and cipher suites which have either already been removed from the standard library, will be removed in an upcoming release, or which were never included in the first place.
 
@@ -13,7 +13,7 @@ The current version is based on go1.21.4.
 
 This library is inherently insecure and should not be used in any situation where security is a requirement.
 
-This library might be suitable in the rare case where
+It might be suitable in the rare case where
 
   * you must connect to a client or server which only supports a broken version of TLS, and
   * you cannot upgrade that client or server to a non-broken version, and
