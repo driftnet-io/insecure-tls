@@ -831,6 +831,16 @@ func TestHandshakeServerRSAAES(t *testing.T) {
 	runServerTestTLS12(t, test)
 }
 
+func TestHandshakeServerRSAAES256(t *testing.T) {
+	test := &serverTest{
+		name:    "RSA-AES256",
+		command: []string{"openssl", "s_client", "-no_ticket", "-cipher", "AES256-SHA"},
+	}
+	runServerTestSSLv3(t, test)
+	runServerTestTLS10(t, test)
+	runServerTestTLS12(t, test)
+}
+
 func TestHandshakeServerAESGCM(t *testing.T) {
 	test := &serverTest{
 		name:    "RSA-AES-GCM",
@@ -884,6 +894,22 @@ func TestHandshakeServerECDHEECDSAAES(t *testing.T) {
 	runServerTestTLS10(t, test)
 	runServerTestTLS12(t, test)
 	runServerTestTLS13(t, test)
+}
+
+func TestHandshakeServerECDHEECDSA3DES(t *testing.T) {
+	config := testConfig.Clone()
+	config.Certificates = make([]Certificate, 1)
+	config.Certificates[0].Certificate = [][]byte{testECDSACertificate}
+	config.Certificates[0].PrivateKey = testECDSAPrivateKey
+	config.BuildNameToCertificate()
+
+	test := &serverTest{
+		name:    "ECDHE-ECDSA-3DES",
+		command: []string{"openssl", "s_client", "-no_ticket", "-cipher", "ECDHE-ECDSA-DES-CBC3-SHA", "-ciphersuites", "TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA"},
+		config:  config,
+	}
+	runServerTestTLS10(t, test)
+	runServerTestTLS12(t, test)
 }
 
 func TestHandshakeServerX25519(t *testing.T) {

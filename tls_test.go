@@ -1544,6 +1544,12 @@ func TestCipherSuites(t *testing.T) {
 			} else if strings.Contains(aName, "CBC_SHA256") && !strings.Contains(bName, "CBC_SHA256") {
 				return false
 			}
+			// * < CBC_SHA384
+			if !strings.Contains(aName, "CBC_SHA384") && strings.Contains(bName, "CBC_SHA384") {
+				return true
+			} else if strings.Contains(aName, "CBC_SHA384") && !strings.Contains(bName, "CBC_SHA384") {
+				return false
+			}
 			// * < 3DES
 			if !strings.Contains(aName, "3DES") && strings.Contains(bName, "3DES") {
 				return true
@@ -1614,9 +1620,11 @@ func http2isBadCipher(cipher uint16) bool {
 		TLS_RSA_WITH_AES_128_CBC_SHA,
 		TLS_RSA_WITH_AES_256_CBC_SHA,
 		TLS_RSA_WITH_AES_128_CBC_SHA256,
+		TLS_RSA_WITH_AES_256_CBC_SHA256,
 		TLS_RSA_WITH_AES_128_GCM_SHA256,
 		TLS_RSA_WITH_AES_256_GCM_SHA384,
 		TLS_ECDHE_ECDSA_WITH_RC4_128_SHA,
+		TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA,
 		TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
 		TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
 		TLS_ECDHE_RSA_WITH_RC4_128_SHA,
@@ -1624,7 +1632,9 @@ func http2isBadCipher(cipher uint16) bool {
 		TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
 		TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
 		TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
-		TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256:
+		TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384,
+		TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
+		TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384:
 		return true
 	default:
 		return false
