@@ -594,6 +594,18 @@ func TestHandshakeClientECDHEECDSAAES(t *testing.T) {
 	runClientTestTLS12(t, test)
 }
 
+func TestHandshakeClientECDHEECDSA3DES(t *testing.T) {
+	test := &clientTest{
+		name: "ECDHE-ECDSA-3DES",
+		args: []string{"-cipher", "ECDHE-ECDSA-DES-CBC3-SHA"},
+		cert: testECDSACertificate,
+		key:  testECDSAPrivateKey,
+	}
+	runClientTestTLS10(t, test)
+	runClientTestTLS11(t, test)
+	runClientTestTLS12(t, test)
+}
+
 func TestHandshakeClientECDHEECDSAAESGCM(t *testing.T) {
 	test := &clientTest{
 		name: "ECDHE-ECDSA-AES-GCM",
@@ -622,6 +634,14 @@ func TestHandshakeClientAES128CBCSHA256(t *testing.T) {
 	runClientTestTLS12(t, test)
 }
 
+func TestHandshakeClientAES256CBCSHA256(t *testing.T) {
+	test := &clientTest{
+		name: "AES256-SHA256",
+		args: []string{"-cipher", "AES256-SHA256"},
+	}
+	runClientTestTLS12(t, test)
+}
+
 func TestHandshakeClientECDHERSAAES128CBCSHA256(t *testing.T) {
 	test := &clientTest{
 		name: "ECDHE-RSA-AES128-SHA256",
@@ -630,10 +650,28 @@ func TestHandshakeClientECDHERSAAES128CBCSHA256(t *testing.T) {
 	runClientTestTLS12(t, test)
 }
 
+func TestHandshakeClientECDHERSAAES256CBCSHA384(t *testing.T) {
+	test := &clientTest{
+		name: "ECDHE-RSA-AES256-SHA384",
+		args: []string{"-cipher", "ECDHE-RSA-AES256-SHA384"},
+	}
+	runClientTestTLS12(t, test)
+}
+
 func TestHandshakeClientECDHEECDSAAES128CBCSHA256(t *testing.T) {
 	test := &clientTest{
 		name: "ECDHE-ECDSA-AES128-SHA256",
 		args: []string{"-cipher", "ECDHE-ECDSA-AES128-SHA256"},
+		cert: testECDSACertificate,
+		key:  testECDSAPrivateKey,
+	}
+	runClientTestTLS12(t, test)
+}
+
+func TestHandshakeClientECDHEECDSAAES256CBCSHA384(t *testing.T) {
+	test := &clientTest{
+		name: "ECDHE-ECDSA-AES256-SHA384",
+		args: []string{"-cipher", "ECDHE-ECDSA-AES256-SHA384"},
 		cert: testECDSACertificate,
 		key:  testECDSAPrivateKey,
 	}
