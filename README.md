@@ -51,7 +51,13 @@ SSLv3 client support is introduced, and enabled by default.
 
 ### Additional cipher suites
 
-The cipher suite `TLS_RSA_WITH_RC4_128_MD5` is added to `InsecureCipherSuites()`. It may be used with protocol versions SSLv3 to TLS 1.2.
+The following additional cipher suites are added to `InsecureCipherSuites()`:
+
+  * `TLS_RSA_WITH_RC4_128_MD5` (protocol versions SSLv3 to TLS 1.2),
+  * `TLS_RSA_WITH_AES_256_CBC_SHA256` (TLS 1.2 only),
+  * `TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA` (SSLv3 to TLS1.2),
+  * `TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384` (TLS 1.2 only), and
+  * `TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384` (TLS 1.2 only).
 
 ### Maximum size of server RSA certificates
 
