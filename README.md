@@ -6,8 +6,7 @@ It is motivated by ongoing efforts to deprecate and eventually remove weak or br
 
 This fork aims for minimal deviation from the official `crypto/tls`, whilst supporting protocols and cipher suites which have either already been removed from the standard library, will be removed in an upcoming release, or which were never included in the first place.
 
-The current version is based on go1.21.4.
-
+The current version is based on go1.22.3.
 
 ## When to use this library
 
@@ -15,12 +14,11 @@ This library is inherently insecure and should not be used in any situation wher
 
 It might be suitable in the rare case where
 
-  * you must connect to a client or server which only supports a broken version of TLS, and
-  * you cannot upgrade that client or server to a non-broken version, and
-  * you are willing to completely give up the confidentiality, integrity and authentication that TLS provides.
+- you must connect to a client or server which only supports a broken version of TLS, and
+- you cannot upgrade that client or server to a non-broken version, and
+- you are willing to completely give up the confidentiality, integrity and authentication that TLS provides.
 
 In all other cases, stick to `crypto/tls`.
-
 
 ## How to use this library
 
@@ -38,7 +36,6 @@ import tls "github.com/driftnet-io/insecure-tls"
 
 As a convenience, the fork re-uses `(crypto/tls).ConnectionState` as-is, and makes it accessible as `(github.com/driftnet-io/insecure-tls).ConnectionState.ConnectionState`.
 
-
 ## Changes with respect to the standard library
 
 ### SSLv3 server support
@@ -53,12 +50,20 @@ SSLv3 client support is introduced, and enabled by default.
 
 The following additional cipher suites are added to `InsecureCipherSuites()`:
 
-  * `TLS_RSA_WITH_RC4_128_MD5` (protocol versions SSLv3 to TLS 1.2),
-  * `TLS_RSA_WITH_AES_256_CBC_SHA256` (TLS 1.2 only),
-  * `TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA` (SSLv3 to TLS1.2),
-  * `TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384` (TLS 1.2 only), and
-  * `TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384` (TLS 1.2 only).
+- `TLS_RSA_WITH_RC4_128_MD5` (protocol versions SSLv3 to TLS 1.2),
+- `TLS_RSA_WITH_AES_256_CBC_SHA256` (TLS 1.2 only),
+- `TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA` (SSLv3 to TLS1.2),
+- `TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384` (TLS 1.2 only), and
+- `TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384` (TLS 1.2 only).
 
 ### Maximum size of server RSA certificates
 
 This is usually configurable by setting `GODEBUG=tlsmaxrsasize=n`. However, as `GODEBUG` internals are not available to us outside the standard library, this is set to a fixed value of 16384 bytes.
+
+### RSA key exchange cipher suites
+
+This code always acts as if `GODEBUG=tlsrsakex=1` were set. See issue [63413](https://github.com/golang/go/issues/63413).
+
+### Exporting key material
+
+This code always acts as if `GODEBUG=tlsunsafeekm=1` were set.
