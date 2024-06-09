@@ -46,18 +46,13 @@ var (
 
 // CipherSuites returns a list of cipher suites currently implemented by this
 // package, excluding those with security issues, which are returned by
-// InsecureCipherSuites.
+// [InsecureCipherSuites].
 //
 // The list is sorted by ID. Note that the default cipher suites selected by
 // this package might depend on logic that can't be captured by a static list,
 // and might not match those returned by this function.
 func CipherSuites() []*CipherSuite {
 	return []*CipherSuite{
-		{TLS_RSA_WITH_AES_128_CBC_SHA, "TLS_RSA_WITH_AES_128_CBC_SHA", supportedUpToTLS12, false},
-		{TLS_RSA_WITH_AES_256_CBC_SHA, "TLS_RSA_WITH_AES_256_CBC_SHA", supportedUpToTLS12, false},
-		{TLS_RSA_WITH_AES_128_GCM_SHA256, "TLS_RSA_WITH_AES_128_GCM_SHA256", supportedOnlyTLS12, false},
-		{TLS_RSA_WITH_AES_256_GCM_SHA384, "TLS_RSA_WITH_AES_256_GCM_SHA384", supportedOnlyTLS12, false},
-
 		{TLS_AES_128_GCM_SHA256, "TLS_AES_128_GCM_SHA256", supportedOnlyTLS13, false},
 		{TLS_AES_256_GCM_SHA384, "TLS_AES_256_GCM_SHA384", supportedOnlyTLS13, false},
 		{TLS_CHACHA20_POLY1305_SHA256, "TLS_CHACHA20_POLY1305_SHA256", supportedOnlyTLS13, false},
@@ -79,7 +74,7 @@ func CipherSuites() []*CipherSuite {
 // this package and which have security issues.
 //
 // Most applications should not use the cipher suites in this list, and should
-// only use those returned by CipherSuites.
+// only use those returned by [CipherSuites].
 func InsecureCipherSuites() []*CipherSuite {
 	// This list includes RC4, CBC_SHA256, and 3DES cipher suites. See
 	// cipherSuitesPreferenceOrder for details.
@@ -87,8 +82,12 @@ func InsecureCipherSuites() []*CipherSuite {
 		{TLS_RSA_WITH_RC4_128_MD5, "TLS_RSA_WITH_RC4_128_MD5", supportedUpToTLS12, true},
 		{TLS_RSA_WITH_RC4_128_SHA, "TLS_RSA_WITH_RC4_128_SHA", supportedUpToTLS12, true},
 		{TLS_RSA_WITH_3DES_EDE_CBC_SHA, "TLS_RSA_WITH_3DES_EDE_CBC_SHA", supportedUpToTLS12, true},
+		{TLS_RSA_WITH_AES_128_CBC_SHA, "TLS_RSA_WITH_AES_128_CBC_SHA", supportedUpToTLS12, true},
+		{TLS_RSA_WITH_AES_256_CBC_SHA, "TLS_RSA_WITH_AES_256_CBC_SHA", supportedUpToTLS12, true},
 		{TLS_RSA_WITH_AES_128_CBC_SHA256, "TLS_RSA_WITH_AES_128_CBC_SHA256", supportedOnlyTLS12, true},
 		{TLS_RSA_WITH_AES_256_CBC_SHA256, "TLS_RSA_WITH_AES_256_CBC_SHA256", supportedOnlyTLS12, true},
+		{TLS_RSA_WITH_AES_128_GCM_SHA256, "TLS_RSA_WITH_AES_128_GCM_SHA256", supportedOnlyTLS12, true},
+		{TLS_RSA_WITH_AES_256_GCM_SHA384, "TLS_RSA_WITH_AES_256_GCM_SHA384", supportedOnlyTLS12, true},
 		{TLS_ECDHE_ECDSA_WITH_RC4_128_SHA, "TLS_ECDHE_ECDSA_WITH_RC4_128_SHA", supportedUpToTLS12, true},
 		{TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA, "TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA", supportedUpToTLS12, true},
 		{TLS_ECDHE_RSA_WITH_RC4_128_SHA, "TLS_ECDHE_RSA_WITH_RC4_128_SHA", supportedUpToTLS12, true},
@@ -335,22 +334,34 @@ var cipherSuitesPreferenceOrderNoAES = []uint16{
 	TLS_RSA_WITH_RC4_128_SHA, TLS_RSA_WITH_RC4_128_MD5,
 }
 
-// disabledCipherSuites are not used unless explicitly listed in
-// Config.CipherSuites. They MUST be at the end of cipherSuitesPreferenceOrder.
-var disabledCipherSuites = []uint16{
+// disabledCipherSuites are not used unless explicitly listed in Config.CipherSuites.
+var disabledCipherSuites = map[uint16]bool{
 	// CBC_SHA384 / CBC_SHA256
-	TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384, TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384, TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256, TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
-	TLS_RSA_WITH_AES_128_CBC_SHA256, TLS_RSA_WITH_AES_256_CBC_SHA256,
+	TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384: true,
+	TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384:   true,
+	TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256: true,
+	TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256:   true,
+	TLS_RSA_WITH_AES_128_CBC_SHA256:         true,
+	TLS_RSA_WITH_AES_256_CBC_SHA256:         true,
 
 	// RC4
-	TLS_ECDHE_ECDSA_WITH_RC4_128_SHA, TLS_ECDHE_RSA_WITH_RC4_128_SHA,
-	TLS_RSA_WITH_RC4_128_SHA, TLS_RSA_WITH_RC4_128_MD5,
+	TLS_ECDHE_ECDSA_WITH_RC4_128_SHA: true,
+	TLS_ECDHE_RSA_WITH_RC4_128_SHA:   true,
+	TLS_RSA_WITH_RC4_128_SHA:         true,
+	TLS_RSA_WITH_RC4_128_MD5:         true,
 }
 
-var (
-	defaultCipherSuitesLen = len(cipherSuitesPreferenceOrder) - len(disabledCipherSuites)
-	defaultCipherSuites    = cipherSuitesPreferenceOrder[:defaultCipherSuitesLen]
-)
+var defaultCipherSuites []uint16
+
+func init() {
+	defaultCipherSuites = make([]uint16, 0, len(cipherSuitesPreferenceOrder))
+	for _, c := range cipherSuitesPreferenceOrder {
+		if disabledCipherSuites[c] {
+			continue
+		}
+		defaultCipherSuites = append(defaultCipherSuites, c)
+	}
+}
 
 // defaultCipherSuitesTLS13 is also the preference order, since there are no
 // disabled by default TLS 1.3 cipher suites. The same AES vs ChaCha20 logic as
