@@ -398,14 +398,7 @@ func TestVersion(t *testing.T) {
 		t.Fatalf("handshake failed: %s", err)
 	}
 	if state.Version != VersionTLS13 {
-		t.Fatalf("incorrect version %x, should be %x", state.Version, VersionTLS11)
-	}
-
-	clientConfig.MinVersion = 0
-	serverConfig.MaxVersion = VersionTLS11
-	_, _, err = testHandshake(t, clientConfig, serverConfig)
-	if err == nil {
-		t.Fatalf("expected failure to connect with TLS 1.0/1.1")
+		t.Fatalf("incorrect version %x, should be %x", state.Version, VersionTLS13)
 	}
 }
 

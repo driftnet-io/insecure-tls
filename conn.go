@@ -1492,9 +1492,8 @@ func (c *Conn) closeNotify() error {
 // [Conn.HandshakeContext] or the [Dialer]'s DialContext method instead.
 //
 // In order to avoid denial of service attacks, the maximum RSA key size allowed
-// in certificates sent by either the TLS server or client is limited to 8192
-// bits. This limit can be overridden by setting tlsmaxrsasize in the GODEBUG
-// environment variable (e.g. GODEBUG=tlsmaxrsasize=4096).
+// in certificates sent by either the TLS server or client is limited to 16384
+// bits.
 func (c *Conn) Handshake() error {
 	return c.HandshakeContext(context.Background())
 }
@@ -1622,8 +1621,6 @@ func (c *Conn) ConnectionState() ConnectionState {
 	return c.connectionStateLocked()
 }
 
-var tlsunsafeekm = godebug.New("tlsunsafeekm")
-
 func (c *Conn) connectionStateLocked() ConnectionState {
 	var state ConnectionState
 	state.HandshakeComplete = c.isHandshakeComplete.Load()
@@ -1648,11 +1645,7 @@ func (c *Conn) connectionStateLocked() ConnectionState {
 		state.ekm = noEKMBecauseRenegotiation
 	} else if c.vers != VersionTLS13 && !c.extMasterSecret {
 		state.ekm = func(label string, context []byte, length int) ([]byte, error) {
-			if tlsunsafeekm.Value() == "1" {
-				tlsunsafeekm.IncNonDefault()
-				return c.ekm(label, context, length)
-			}
-			return noEKMBecauseNoEMS(label, context, length)
+			return c.ekm(label, context, length)
 		}
 	} else {
 		state.ekm = c.ekm
