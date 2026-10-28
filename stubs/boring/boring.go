@@ -1,3 +1,5 @@
+// Package boring is a replacement for crypto/internal/boring with BoringCrypto
+// permanently disabled.
 package boring
 
 import "crypto/cipher"
@@ -13,4 +15,9 @@ func Unreachable() {
 // NewGCMTLS should never be called
 func NewGCMTLS(cipher cipher.Block) (cipher.AEAD, error) {
 	panic("boring.NewGCMTLS() called")
+}
+
+// NewGCMTLS13 should never be called
+func NewGCMTLS13(cipher cipher.Block) (cipher.AEAD, error) {
+	panic("boring.NewGCMTLS13() called")
 }

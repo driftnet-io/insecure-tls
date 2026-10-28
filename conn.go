@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/cipher"
 	"crypto/subtle"
+	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -46,13 +47,14 @@ type Conn struct {
 	handshakes       int
 	extMasterSecret  bool
 	didResume        bool // whether this connection was a session resumption
+	didHRR           bool // whether a HelloRetryRequest was sent/received
 	cipherSuite      uint16
+	curveID          CurveID
+	peerSigAlg       SignatureScheme
 	ocspResponse     []byte   // stapled OCSP response
 	scts             [][]byte // signed certificate timestamps from server
 	peerCertificates []*x509.Certificate
-	// activeCertHandles contains the cache handles to certificates in
-	// peerCertificates that are used to track active references.
-	activeCertHandles []*activeCert
+	localCertificate [][]byte
 	// verifiedChains contains the certificate chains that we built, as
 	// opposed to the ones presented by the server.
 	verifiedChains [][]*x509.Certificate
@@ -67,6 +69,7 @@ type Conn struct {
 	// resumptionSecret is the resumption_master_secret for handling
 	// or sending NewSessionTicket messages.
 	resumptionSecret []byte
+	echAccepted      bool
 
 	// ticketKeys is the set of active session ticket keys for this
 	// connection. The first one is used to encrypt new tickets and
@@ -172,7 +175,7 @@ type halfConn struct {
 	mac     macFunction
 	seq     [8]byte // 64-bit sequence number
 
-	additionalData [13]byte // to avoid allocs; interface method args escape
+	scratchBuf [13]byte // to avoid allocs; interface method args escape
 
 	nextCipher any         // next encryption state
 	nextMac    macFunction // next MAC algorithm
@@ -217,20 +220,19 @@ func (hc *halfConn) changeCipherSpec() error {
 	hc.mac = hc.nextMac
 	hc.nextCipher = nil
 	hc.nextMac = nil
-	for i := range hc.seq {
-		hc.seq[i] = 0
-	}
+	clear(hc.seq[:])
 	return nil
 }
 
+// setTrafficSecret sets the traffic secret for the given encryption level. setTrafficSecret
+// should not be called directly, but rather through the Conn setWriteTrafficSecret and
+// setReadTrafficSecret wrapper methods.
 func (hc *halfConn) setTrafficSecret(suite *cipherSuiteTLS13, level QUICEncryptionLevel, secret []byte) {
 	hc.trafficSecret = secret
 	hc.level = level
 	key, iv := suite.trafficKey(secret)
 	hc.cipher = suite.aead(key, iv)
-	for i := range hc.seq {
-		hc.seq[i] = 0
-	}
+	clear(hc.seq[:])
 }
 
 // incSeq increments the sequence number.
@@ -380,15 +382,14 @@ func (hc *halfConn) decrypt(record []byte) ([]byte, recordType, error) {
 			}
 			payload = payload[explicitNonceLen:]
 
-			additionalData := hc.additionalData[:]
+			var additionalData []byte
 			if hc.version == VersionTLS13 {
 				additionalData = record[:recordHeaderLen]
 			} else {
-				copy(additionalData, hc.seq[:])
-				copy(additionalData[8:], record[:3])
+				additionalData = append(hc.scratchBuf[:0], hc.seq[:]...)
+				additionalData = append(additionalData, record[:3]...)
 				n := len(payload) - c.Overhead()
-				additionalData[11] = byte(n >> 8)
-				additionalData[12] = byte(n)
+				additionalData = append(additionalData, byte(n>>8), byte(n))
 			}
 
 			var err error
@@ -458,7 +459,7 @@ func (hc *halfConn) decrypt(record []byte) ([]byte, recordType, error) {
 		record[3] = byte(n >> 8)
 		record[4] = byte(n)
 		remoteMAC := payload[n : n+macSize]
-		localMAC := hc.mac.MAC(hc.seq[0:], record[:recordHeaderLen], payload[:n], payload[n+macSize:])
+		localMAC := hc.mac.MAC(hc.seq[:], record[:recordHeaderLen], payload[:n], payload[n+macSize:])
 
 		// This is equivalent to checking the MACs and paddingGood
 		// separately, but in constant-time to prevent distinguishing
@@ -494,7 +495,7 @@ func sliceForAppend(in []byte, n int) (head, tail []byte) {
 }
 
 // encrypt encrypts payload, adding the appropriate nonce and/or MAC, and
-// appends it to record, which contains the record header.
+// appends it to record, which must already contain the record header.
 func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, error) {
 	if hc.cipher == nil {
 		return append(record, payload...), nil
@@ -511,7 +512,7 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 			// an 8 bytes nonce but its nonces must be unpredictable (see RFC
 			// 5246, Appendix F.3), forcing us to use randomness. That's not
 			// 3DES' biggest problem anyway because the birthday bound on block
-			// collision is reached first due to its simlarly small block size
+			// collision is reached first due to its similarly small block size
 			// (see the Sweet32 attack).
 			copy(explicitNonce, hc.seq[:])
 		} else {
@@ -521,14 +522,10 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 		}
 	}
 
-	var mac []byte
-	if hc.mac != nil {
-		mac = hc.mac.MAC(hc.seq[:], record[:recordHeaderLen], payload, nil)
-	}
-
 	var dst []byte
 	switch c := hc.cipher.(type) {
 	case cipher.Stream:
+		mac := hc.mac.MAC(hc.seq[:], record[:recordHeaderLen], payload, nil)
 		record, dst = sliceForAppend(record, len(payload)+len(mac))
 		c.XORKeyStream(dst[:len(payload)], payload)
 		c.XORKeyStream(dst[len(payload):], mac)
@@ -552,11 +549,12 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 			record = c.Seal(record[:recordHeaderLen],
 				nonce, record[recordHeaderLen:], record[:recordHeaderLen])
 		} else {
-			copy(hc.additionalData[:], hc.seq[:])
-			copy(hc.additionalData[8:], record)
-			record = c.Seal(record, nonce, payload, hc.additionalData[:])
+			additionalData := append(hc.scratchBuf[:0], hc.seq[:]...)
+			additionalData = append(additionalData, record[:recordHeaderLen]...)
+			record = c.Seal(record, nonce, payload, additionalData)
 		}
 	case cbcMode:
+		mac := hc.mac.MAC(hc.seq[:], record[:recordHeaderLen], payload, nil)
 		blockSize := c.BlockSize()
 		plaintextLen := len(payload) + len(mac)
 		paddingLen := blockSize - plaintextLen%blockSize
@@ -718,7 +716,7 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 		return c.in.setErrorLocked(c.sendAlert(alertUnexpectedMessage))
 	}
 
-	if typ != recordTypeAlert && typ != recordTypeChangeCipherSpec && len(data) > 0 {
+	if (typ == recordTypeApplicationData || (typ == recordTypeHandshake && !handshakeComplete)) && len(data) > 0 {
 		// This is a state-advancing message: reset the retry count.
 		c.retryCount = 0
 	}
@@ -743,6 +741,15 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 			return c.in.setErrorLocked(io.EOF)
 		}
 		if c.vers == VersionTLS13 {
+			// TLS 1.3 removed warning-level alerts except for alertUserCanceled
+			// (RFC 8446, § 6.1). Since at least one major implementation
+			// (https://bugs.openjdk.org/browse/JDK-8323517) misuses this alert,
+			// many TLS stacks now ignore it outright when seen in a TLS 1.3
+			// handshake (e.g. BoringSSL, NSS, Rustls).
+			if alert(data[1]) == alertUserCanceled {
+				// Like TLS 1.2 alertLevelWarning alerts, we drop the record and retry.
+				return c.retryReadRecord(expectChangeCipherSpec)
+			}
 			return c.in.setErrorLocked(&net.OpError{Op: "remote error", Err: alert(data[1])})
 		}
 		switch data[0] {
@@ -813,29 +820,6 @@ func (c *Conn) retryReadRecord(expectChangeCipherSpec bool) error {
 	return c.readRecordOrCCS(expectChangeCipherSpec)
 }
 
-// atLeastReader reads from R, stopping with EOF once at least N bytes have been
-// read. It is different from an io.LimitedReader in that it doesn't cut short
-// the last Read call, and in that it considers an early EOF an error.
-type atLeastReader struct {
-	R io.Reader
-	N int64
-}
-
-func (r *atLeastReader) Read(p []byte) (int, error) {
-	if r.N <= 0 {
-		return 0, io.EOF
-	}
-	n, err := r.R.Read(p)
-	r.N -= int64(n) // won't underflow unless len(p) >= n > 9223372036854775809
-	if r.N > 0 && err == io.EOF {
-		return n, io.ErrUnexpectedEOF
-	}
-	if r.N <= 0 && err == nil {
-		return n, io.EOF
-	}
-	return n, err
-}
-
 // readFromUntil reads from r into c.rawInput until c.rawInput contains
 // at least n bytes or else returns an error.
 func (c *Conn) readFromUntil(r io.Reader, n int) error {
@@ -846,9 +830,31 @@ func (c *Conn) readFromUntil(r io.Reader, n int) error {
 	// There might be extra input waiting on the wire. Make a best effort
 	// attempt to fetch it so that it can be used in (*Conn).Read to
 	// "predict" closeNotify alerts.
+	// TODO(dmo): we use bytes.MinRead here because we used the buffer
+	// ReadFrom mechanism to avoid allocations, but we've hoisted this
+	// loop for performance. We really should use our own heuristic here
+	// for how much to read ahead.
 	c.rawInput.Grow(needs + bytes.MinRead)
-	_, err := c.rawInput.ReadFrom(&atLeastReader{r, int64(needs)})
-	return err
+	for {
+		buf := c.rawInput.AvailableBuffer()[:c.rawInput.Available()]
+		n, err := r.Read(buf)
+		// This write is just to update the internal state of the
+		// rawInput bytes.Buffer. It cannot fail.
+		c.rawInput.Write(buf[:n])
+		needs -= n
+		if needs <= 0 {
+			if err == io.EOF {
+				err = nil
+			}
+			return err
+		}
+		if err == io.EOF {
+			return io.ErrUnexpectedEOF
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
 
 // sendAlertLocked sends a TLS alert message.
@@ -1062,7 +1068,7 @@ func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
 }
 
 // writeHandshakeRecord writes a handshake message to the connection and updates
-// the record layer state. If transcript is non-nil the marshalled message is
+// the record layer state. If transcript is non-nil the marshaled message is
 // written to it.
 func (c *Conn) writeHandshakeRecord(msg handshakeMessage, transcript transcriptHash) (int, error) {
 	c.out.Lock()
@@ -1109,10 +1115,22 @@ func (c *Conn) readHandshake(transcript transcriptHash) (any, error) {
 		return nil, err
 	}
 	data := c.hand.Bytes()
+
+	maxHandshakeSize := maxHandshake
+	// hasVers indicates we're past the first message, forcing someone trying to
+	// make us just allocate a large buffer to at least do the initial part of
+	// the handshake first.
+	if c.haveVers && data[0] == typeCertificate {
+		// Since certificate messages are likely to be the only messages that
+		// can be larger than maxHandshake, we use a special limit for just
+		// those messages.
+		maxHandshakeSize = maxHandshakeCertificateMsg
+	}
+
 	n := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
-	if n > maxHandshake {
+	if n > maxHandshakeSize {
 		c.sendAlertLocked(alertInternalError)
-		return nil, c.in.setErrorLocked(fmt.Errorf("tls: handshake message of length %d bytes exceeds maximum of %d bytes", n, maxHandshake))
+		return nil, c.in.setErrorLocked(fmt.Errorf("tls: handshake message of length %d bytes exceeds maximum of %d bytes", n, maxHandshakeSize))
 	}
 	if err := c.readHandshakeBytes(4 + n); err != nil {
 		return nil, err
@@ -1180,7 +1198,7 @@ func (c *Conn) unmarshalHandshakeMessage(data []byte, transcript transcriptHash)
 	data = append([]byte(nil), data...)
 
 	if !m.unmarshal(data) {
-		return nil, c.in.setErrorLocked(c.sendAlert(alertUnexpectedMessage))
+		return nil, c.in.setErrorLocked(c.sendAlert(alertDecodeError))
 	}
 
 	if transcript != nil {
@@ -1343,9 +1361,6 @@ func (c *Conn) handleKeyUpdate(keyUpdate *keyUpdateMsg) error {
 		return c.in.setErrorLocked(c.sendAlert(alertInternalError))
 	}
 
-	newSecret := cipherSuite.nextTrafficSecret(c.in.trafficSecret)
-	c.in.setTrafficSecret(cipherSuite, QUICEncryptionLevelInitial, newSecret)
-
 	if keyUpdate.updateRequested {
 		c.out.Lock()
 		defer c.out.Unlock()
@@ -1363,7 +1378,12 @@ func (c *Conn) handleKeyUpdate(keyUpdate *keyUpdateMsg) error {
 		}
 
 		newSecret := cipherSuite.nextTrafficSecret(c.out.trafficSecret)
-		c.out.setTrafficSecret(cipherSuite, QUICEncryptionLevelInitial, newSecret)
+		c.setWriteTrafficSecret(cipherSuite, QUICEncryptionLevelInitial, newSecret)
+	}
+
+	newSecret := cipherSuite.nextTrafficSecret(c.in.trafficSecret)
+	if err := c.setReadTrafficSecret(cipherSuite, QUICEncryptionLevelInitial, newSecret, keyUpdate.updateRequested); err != nil {
+		return err
 	}
 
 	return nil
@@ -1492,8 +1512,9 @@ func (c *Conn) closeNotify() error {
 // [Conn.HandshakeContext] or the [Dialer]'s DialContext method instead.
 //
 // In order to avoid denial of service attacks, the maximum RSA key size allowed
-// in certificates sent by either the TLS server or client is limited to 16384
-// bits.
+// in certificates sent by either the TLS server or client is limited to 8192
+// bits. This limit can be overridden by setting tlsmaxrsasize in the GODEBUG
+// environment variable (e.g. GODEBUG=tlsmaxrsasize=4096).
 func (c *Conn) Handshake() error {
 	return c.HandshakeContext(context.Background())
 }
@@ -1523,37 +1544,23 @@ func (c *Conn) handshakeContext(ctx context.Context) (ret error) {
 	}
 
 	handshakeCtx, cancel := context.WithCancel(ctx)
-	// Note: defer this before starting the "interrupter" goroutine
+	// Note: defer this before calling context.AfterFunc
 	// so that we can tell the difference between the input being canceled and
 	// this cancellation. In the former case, we need to close the connection.
 	defer cancel()
 
 	if c.quic != nil {
-		c.quic.cancelc = handshakeCtx.Done()
+		c.quic.ctx = handshakeCtx
 		c.quic.cancel = cancel
 	} else if ctx.Done() != nil {
-		// Start the "interrupter" goroutine, if this context might be canceled.
-		// (The background context cannot).
-		//
-		// The interrupter goroutine waits for the input context to be done and
-		// closes the connection if this happens before the function returns.
-		done := make(chan struct{})
-		interruptRes := make(chan error, 1)
+		// Close the connection if ctx is canceled before the function returns.
+		stop := context.AfterFunc(ctx, func() {
+			_ = c.conn.Close()
+		})
 		defer func() {
-			close(done)
-			if ctxErr := <-interruptRes; ctxErr != nil {
+			if !stop() {
 				// Return context error to user.
-				ret = ctxErr
-			}
-		}()
-		go func() {
-			select {
-			case <-handshakeCtx.Done():
-				// Close the connection, discarding the error
-				_ = c.conn.Close()
-				interruptRes <- handshakeCtx.Err()
-			case <-done:
-				interruptRes <- nil
+				ret = ctx.Err()
 			}
 		}()
 	}
@@ -1593,11 +1600,13 @@ func (c *Conn) handshakeContext(ctx context.Context) (ret error) {
 			// Provide the 1-RTT read secret now that the handshake is complete.
 			// The QUIC layer MUST NOT decrypt 1-RTT packets prior to completing
 			// the handshake (RFC 9001, Section 5.7).
-			c.quicSetReadSecret(QUICEncryptionLevelApplication, c.cipherSuite, c.in.trafficSecret)
+			if err := c.quicSetReadSecret(QUICEncryptionLevelApplication, c.cipherSuite, c.in.trafficSecret); err != nil {
+				return err
+			}
 		} else {
-			var a alert
 			c.out.Lock()
-			if !errors.As(c.out.err, &a) {
+			a, ok := errors.AsType[alert](c.out.err)
+			if !ok {
 				a = alertInternalError
 			}
 			c.out.Unlock()
@@ -1615,6 +1624,12 @@ func (c *Conn) handshakeContext(ctx context.Context) (ret error) {
 }
 
 // ConnectionState returns basic TLS details about the connection.
+//
+// The returned [ConnectionState] is only meaningful after the handshake has
+// completed, as reported by [ConnectionState.HandshakeComplete]; before then
+// its fields are not populated. The handshake is run automatically by the
+// first [Conn.Read] or [Conn.Write], or it can be triggered explicitly with
+// [Conn.Handshake].
 func (c *Conn) ConnectionState() ConnectionState {
 	c.handshakeMutex.Lock()
 	defer c.handshakeMutex.Unlock()
@@ -1627,10 +1642,14 @@ func (c *Conn) connectionStateLocked() ConnectionState {
 	state.Version = c.vers
 	state.NegotiatedProtocol = c.clientProtocol
 	state.DidResume = c.didResume
+	state.HelloRetryRequest = c.didHRR
+	state.testingOnlyPeerSignatureAlgorithm = c.peerSigAlg
+	state.CurveID = tls.CurveID(c.curveID)
 	state.NegotiatedProtocolIsMutual = true
 	state.ServerName = c.serverName
 	state.CipherSuite = c.cipherSuite
 	state.PeerCertificates = c.peerCertificates
+	state.LocalCertificate = c.localCertificate
 	state.VerifiedChains = c.verifiedChains
 	state.SignedCertificateTimestamps = c.scts
 	state.OCSPResponse = c.ocspResponse
@@ -1644,12 +1663,13 @@ func (c *Conn) connectionStateLocked() ConnectionState {
 	if c.config.Renegotiation != RenegotiateNever {
 		state.ekm = noEKMBecauseRenegotiation
 	} else if c.vers != VersionTLS13 && !c.extMasterSecret {
-		state.ekm = func(label string, context []byte, length int) ([]byte, error) {
-			return c.ekm(label, context, length)
-		}
+		// Unlike crypto/tls, keying material can be exported without Extended
+		// Master Secret: this fork always acts as if GODEBUG=tlsunsafeekm=1.
+		state.ekm = c.ekm
 	} else {
 		state.ekm = c.ekm
 	}
+	state.ECHAccepted = c.echAccepted
 	return state
 }
 
@@ -1678,4 +1698,30 @@ func (c *Conn) VerifyHostname(host string) error {
 		return errors.New("tls: handshake did not verify certificate chain")
 	}
 	return c.peerCertificates[0].VerifyHostname(host)
+}
+
+// setReadTrafficSecret sets the read traffic secret for the given encryption level. If
+// being called at the same time as setWriteTrafficSecret, the caller must ensure the call
+// to setWriteTrafficSecret happens first so any alerts are sent at the write level.
+func (c *Conn) setReadTrafficSecret(suite *cipherSuiteTLS13, level QUICEncryptionLevel, secret []byte, locked bool) error {
+	// Ensure that there are no buffered handshake messages before changing the
+	// read keys, since that can cause messages to be parsed that were encrypted
+	// using old keys which are no longer appropriate.
+	if c.hand.Len() != 0 {
+		if locked {
+			c.sendAlertLocked(alertUnexpectedMessage)
+		} else {
+			c.sendAlert(alertUnexpectedMessage)
+		}
+		return errors.New("tls: handshake buffer not empty before setting read traffic secret")
+	}
+	c.in.setTrafficSecret(suite, level, secret)
+	return nil
+}
+
+// setWriteTrafficSecret sets the write traffic secret for the given encryption level. If
+// being called at the same time as setReadTrafficSecret, the caller must ensure the call
+// to setWriteTrafficSecret happens first so any alerts are sent at the write level.
+func (c *Conn) setWriteTrafficSecret(suite *cipherSuiteTLS13, level QUICEncryptionLevel, secret []byte) {
+	c.out.setTrafficSecret(suite, level, secret)
 }
